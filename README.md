@@ -34,9 +34,11 @@ Du kannst in den Raycast-Einstellungen der Erweiterung ein Standard-Suchverzeich
 ## Warum ist diese Suche so schnell?
 
 - **Streaming**: Wir warten nicht auf den Abschluss des gesamten Suchvorgangs. Ergebnisse werden angezeigt, sobald der erste Treffer vorliegt.
+- **Batched UI Updates**: Die Benutzeroberfläche wird in Intervallen aktualisiert, um auch bei tausenden Treffern flüssig zu bleiben.
 - **JSON-Processing**: Die Kommunikation mit `ripgrep` erfolgt über einen hocheffizienten JSON-Stream.
-- **Intelligente Abbrüche**: Sobald du weiter tippst, wird die vorherige Suche sofort auf Systemebene beendet, um Ressourcen zu sparen.
-- **Optimierte Parameter**: Wir nutzen Flags wie `--max-filesize`, `--no-messages` und gezielte Ausschlussmuster, um unnötige Dateizugriffe zu vermeiden.
+- **Intelligente Abbrüche**: Sobald du weiter tippst, wird die vorherige Suche sofort auf Systemebene beendet.
+- **Optimierte Parameter**: Wir nutzen Flags wie `--no-unicode`, `--max-count 5` und aggressive Ausschlussmuster für Systemverzeichnisse.
+- **Throttle**: Raycast-natives Throttling verhindert unnötige Prozess-Spawns bei schnellem Tippen.
 
 ---
 

@@ -37,6 +37,51 @@ const IGNORED_DIRS = [
   ".Trash",
   ".cache",
   ".npm",
+  ".idea",
+  ".vscode",
+  ".settings",
+  ".gradle",
+  ".m2",
+  "bower_components",
+  "__pycache__",
+  ".pytest_cache",
+  ".sass-cache",
+  "Pods",
+  "DerivedData",
+  ".yarn",
+  ".pnpm",
+  ".pnpm-store",
+  "jspm_packages",
+  ".composer",
+  ".fleet",
+  ".cursor",
+  ".vscode-server",
+  ".history",
+  ".metadata",
+  ".recommenders",
+  ".nuxt",
+  ".docusaurus",
+  ".turbo",
+  ".vercel",
+  ".expo",
+  "_build",
+  ".elixir_ls",
+  ".mypy_cache",
+  ".ruff_cache",
+  "coverage",
+  ".nyc_output",
+  ".tox",
+  ".nox",
+  ".terraform",
+  ".serverless",
+  ".aws",
+  ".azure",
+  ".gcloud",
+  ".kube",
+  ".docker",
+  ".minikube",
+  ".zsh_sessions",
+  "Applications",
 ];
 
 const COMMON_PATHS = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
@@ -47,6 +92,7 @@ export default function Command() {
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const updateTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const resultsRef = useRef<SearchResult[]>([]);
 
   const preferences = getPreferenceValues<Preferences>();
@@ -66,6 +112,11 @@ export default function Command() {
       // Vorherige Suche abbrechen
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
+      }
+
+      if (updateTimeoutRef.current) {
+        clearTimeout(updateTimeoutRef.current);
+        updateTimeoutRef.current = null;
       }
 
       if (!text || text.length < 2) {
@@ -91,18 +142,20 @@ export default function Command() {
         // --word-regexp: ganze wörter
         // --case-sensitive: groß-/kleinschreibung
         // --max-columns 500: lange zeilen kappen
-        // --max-count 10: limit pro datei
+        // --max-count 5: limit pro datei (optimiert)
         // --max-filesize 1M: riesige dateien ignorieren
         // --no-messages: keine berechtigungsfehler anzeigen
+        // --no-unicode: schneller bei literaler suche
         const args = [
           "--json",
           "--fixed-strings",
           "--word-regexp",
           "--case-sensitive",
           "--max-columns", "500",
-          "--max-count", "10",
+          "--max-count", "5",
           "--max-filesize", "1M",
           "--no-messages",
+          "--no-unicode",
           ...ignoreArgs,
           text,
           searchDir
@@ -135,10 +188,15 @@ export default function Command() {
                 text: data.lines.text.trim(),
               };
               
-              resultsRef.current = [...resultsRef.current, newResult];
-              // Wir nutzen ein kleines Batching oder setzen den State direkt,
-              // da Raycast's UI damit umgehen kann.
-              setResults([...resultsRef.current]);
+              resultsRef.current.push(newResult);
+
+              // Batched UI updates: Update every 50ms to prevent UI lag
+              if (!updateTimeoutRef.current) {
+                updateTimeoutRef.current = setTimeout(() => {
+                  setResults([...resultsRef.current]);
+                  updateTimeoutRef.current = null;
+                }, 50);
+              }
             }
           } catch (e) {
             // Ignoriere fehlerhafte JSON zeilen
@@ -157,6 +215,13 @@ export default function Command() {
 
         child.on("close", (code) => {
           setIsLoading(false);
+          // Letztes Update erzwingen
+          if (updateTimeoutRef.current) {
+            clearTimeout(updateTimeoutRef.current);
+            updateTimeoutRef.current = null;
+          }
+          setResults([...resultsRef.current]);
+
           // Wenn wir keine ergebnisse haben und der code nicht 0 ist (und nicht 1, was "keine treffer" bedeutet)
           if (resultsRef.current.length === 0 && code !== 0 && code !== 1 && !controller.signal.aborted) {
              // Möglicherweise ein fehler, aber wir zeigen einfach "Keine Ergebnisse" oder den bisherigen Stand
