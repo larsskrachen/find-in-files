@@ -9,6 +9,7 @@ Eine hocheffiziente Raycast-Erweiterung für die blitzschnelle Volltextsuche inn
 - **Intelligente Filterung**: Ignoriert automatisch `node_modules`, `.venv`, `Library`, `Caches`, `.git`, `dist`, `build` und viele weitere Systemverzeichnisse.
 - **Exakte Suche**: Findet exakt den eingegebenen Begriff (keine Fuzzy-Suche im Dateicontent).
 - **Integrierte Vorschau**: Permanentes Detail-Fenster mit Dateipfad, Zeilennummer und Code-Vorschau für den schnellen Überblick.
+- **Plattformübergreifend**: Optimiert für Raycast (macOS) und SuperCMD (macOS & Windows).
 - **Erweiterte Aktionen**:
   - In Standard-Editor öffnen.
   - Öffnen mit... (Manuelle App-Auswahl).
@@ -24,10 +25,18 @@ Für diese Erweiterung muss `ripgrep` (rg) auf deinem System installiert sein.
 
 ### Installation von ripgrep
 
-Am einfachsten über Homebrew:
+Am einfachsten über Homebrew (macOS):
 
 ```bash
 brew install ripgrep
+```
+
+Auf Windows (z.B. über Chocolatey oder Scoop):
+
+```powershell
+choco install ripgrep
+# oder
+scoop install ripgrep
 ```
 
 ## Konfiguration
@@ -37,10 +46,10 @@ Du kannst in den Raycast-Einstellungen der Erweiterung ein Standard-Suchverzeich
 ## Warum ist diese Suche so schnell?
 
 - **Streaming**: Wir warten nicht auf den Abschluss des gesamten Suchvorgangs. Ergebnisse werden angezeigt, sobald der erste Treffer vorliegt.
-- **Batched UI Updates**: Die Benutzeroberfläche wird in Intervallen aktualisiert, um auch bei tausenden Treffern flüssig zu bleiben.
-- **JSON-Processing**: Die Kommunikation mit `ripgrep` erfolgt über einen hocheffizienten JSON-Stream.
+- **Batched UI Updates**: Die Benutzeroberfläche wird in Intervallen (80ms) aktualisiert, um auch bei tausenden Treffern flüssig zu bleiben.
+- **Flüssiges Tippen**: Alte Suchergebnisse bleiben sichtbar, bis die neue Suche Ergebnisse liefert. Dies verhindert Flackern und Unterbrechungen beim Tippen.
 - **Intelligente Abbrüche**: Sobald du weiter tippst, wird die vorherige Suche sofort auf Systemebene beendet.
-- **Optimierte Parameter**: Wir nutzen Flags wie `--no-unicode`, `--max-count 5` und aggressive Ausschlussmuster für Systemverzeichnisse.
+- **Optimierte Parameter**: Wir nutzen Flags wie `--no-unicode`, `--max-count 5`, Vorabberechnung von Ausschlussmustern und aggressive Filterung von Systemverzeichnissen.
 - **Throttle**: Raycast-natives Throttling verhindert unnötige Prozess-Spawns bei schnellem Tippen.
 
 ---

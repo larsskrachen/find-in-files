@@ -1,5 +1,5 @@
 import { List, ActionPanel, Action, getPreferenceValues, Icon, Detail } from "@raycast/api";
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { spawn } from "child_process";
 import readline from "readline";
 import path from "path";
@@ -84,8 +84,11 @@ const IGNORED_DIRS = [
   "Applications",
 ];
 
-const COMMON_PATHS = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
+const COMMON_UNIX_PATHS = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
 const MAX_RESULTS = 100;
+const IGNORE_ARGS = IGNORED_DIRS.flatMap((dir) => ["-g", `!**/${dir}/**`]);
+const IS_WINDOWS = os.platform() === "win32";
+const PATH_DELIMITER = path.delimiter;
 
 export default function Command() {
   const [results, setResults] = useState<SearchResult[]>([]);
@@ -96,7 +99,7 @@ export default function Command() {
   const resultsRef = useRef<SearchResult[]>([]);
 
   const preferences = getPreferenceValues<Preferences>();
-  const searchDir = preferences.searchPath || os.homedir();
+  const searchDir = useMemo(() => preferences.searchPath || os.homedir(), [preferences.searchPath]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -128,24 +131,16 @@ export default function Command() {
 
       const controller = new AbortController();
       abortControllerRef.current = controller;
+      
+      // Wir leeren die UI nicht sofort (setResults([]) entfernt), 
+      // damit das Tippen flüssiger wirkt (kein Flackern).
+      // Die neuen Ergebnisse ersetzen die alten, sobald der erste Treffer da ist.
       setIsLoading(true);
       setErrorMsg(null);
-      setResults([]);
       resultsRef.current = [];
 
       try {
-        const ignoreArgs = IGNORED_DIRS.flatMap((dir) => ["-g", `!**/${dir}/**`]);
-        
-        // Ripgrep args:
-        // --json: hocheffizientes streaming format
-        // --fixed-strings: wörtliche suche
-        // --word-regexp: ganze wörter
-        // --case-sensitive: groß-/kleinschreibung
-        // --max-columns 500: lange zeilen kappen
-        // --max-count 5: limit pro datei (optimiert)
-        // --max-filesize 1M: riesige dateien ignorieren
-        // --no-messages: keine berechtigungsfehler anzeigen
-        // --no-unicode: schneller bei literaler suche
+        // Ripgrep args
         const args = [
           "--json",
           "--fixed-strings",
@@ -156,14 +151,20 @@ export default function Command() {
           "--max-filesize", "1M",
           "--no-messages",
           "--no-unicode",
-          ...ignoreArgs,
+          ...IGNORE_ARGS,
           text,
           searchDir
         ];
 
+        // Prepare PATH
+        const currentPath = process.env.PATH || "";
+        const extraPaths = IS_WINDOWS ? [] : COMMON_UNIX_PATHS;
+        const newPath = [...currentPath.split(PATH_DELIMITER), ...extraPaths].join(PATH_DELIMITER);
+
         const child = spawn("rg", args, {
-          env: { ...process.env, PATH: `${process.env.PATH}:${COMMON_PATHS}` },
+          env: { ...process.env, PATH: newPath },
           signal: controller.signal,
+          shell: IS_WINDOWS, // Benötigt für manche Windows-Environments
         });
 
         const rl = readline.createInterface({
@@ -190,12 +191,12 @@ export default function Command() {
               
               resultsRef.current.push(newResult);
 
-              // Batched UI updates: Update every 50ms to prevent UI lag
+              // Batched UI updates: Update every 80ms (optimiert für Flüssigkeit)
               if (!updateTimeoutRef.current) {
                 updateTimeoutRef.current = setTimeout(() => {
                   setResults([...resultsRef.current]);
                   updateTimeoutRef.current = null;
-                }, 50);
+                }, 80);
               }
             }
           } catch (e) {
@@ -220,11 +221,10 @@ export default function Command() {
             clearTimeout(updateTimeoutRef.current);
             updateTimeoutRef.current = null;
           }
-          setResults([...resultsRef.current]);
-
-          // Wenn wir keine ergebnisse haben und der code nicht 0 ist (und nicht 1, was "keine treffer" bedeutet)
-          if (resultsRef.current.length === 0 && code !== 0 && code !== 1 && !controller.signal.aborted) {
-             // Möglicherweise ein fehler, aber wir zeigen einfach "Keine Ergebnisse" oder den bisherigen Stand
+          
+          // Wenn der Prozess fertig ist und wir keine neuen Ergebnisse haben, leeren wir die Liste
+          if (!controller.signal.aborted) {
+            setResults([...resultsRef.current]);
           }
         });
 
@@ -257,10 +257,11 @@ export default function Command() {
       searchBarPlaceholder="Suchen nach Text in Dateien..."
       throttle={true}
       filtering={false}
-      isShowingDetail={results.length > 0}
+      isShowingDetail={true}
     >
       <List.EmptyView 
         title={isLoading ? "Suchen..." : results.length === 0 ? "Keine Ergebnisse" : "Text eingeben"} 
+        description={results.length === 0 && !isLoading ? "Tippe mindestens 2 Zeichen ein, um die Suche zu starten." : undefined}
         icon={Icon.MagnifyingGlass} 
       />
       {results.map((res, index) => (

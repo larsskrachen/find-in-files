@@ -107,8 +107,11 @@ var IGNORED_DIRS = [
   ".zsh_sessions",
   "Applications"
 ];
-var COMMON_PATHS = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
+var COMMON_UNIX_PATHS = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
 var MAX_RESULTS = 100;
+var IGNORE_ARGS = IGNORED_DIRS.flatMap((dir) => ["-g", `!**/${dir}/**`]);
+var IS_WINDOWS = import_os.default.platform() === "win32";
+var PATH_DELIMITER = import_path.default.delimiter;
 function Command() {
   const [results, setResults] = (0, import_react.useState)([]);
   const [isLoading, setIsLoading] = (0, import_react.useState)(false);
@@ -117,7 +120,7 @@ function Command() {
   const updateTimeoutRef = (0, import_react.useRef)(null);
   const resultsRef = (0, import_react.useRef)([]);
   const preferences = (0, import_api.getPreferenceValues)();
-  const searchDir = preferences.searchPath || import_os.default.homedir();
+  const searchDir = (0, import_react.useMemo)(() => preferences.searchPath || import_os.default.homedir(), [preferences.searchPath]);
   (0, import_react.useEffect)(() => {
     return () => {
       if (abortControllerRef.current) {
@@ -144,10 +147,8 @@ function Command() {
       abortControllerRef.current = controller;
       setIsLoading(true);
       setErrorMsg(null);
-      setResults([]);
       resultsRef.current = [];
       try {
-        const ignoreArgs = IGNORED_DIRS.flatMap((dir) => ["-g", `!**/${dir}/**`]);
         const args = [
           "--json",
           "--fixed-strings",
@@ -161,13 +162,18 @@ function Command() {
           "1M",
           "--no-messages",
           "--no-unicode",
-          ...ignoreArgs,
+          ...IGNORE_ARGS,
           text,
           searchDir
         ];
+        const currentPath = process.env.PATH || "";
+        const extraPaths = IS_WINDOWS ? [] : COMMON_UNIX_PATHS;
+        const newPath = [...currentPath.split(PATH_DELIMITER), ...extraPaths].join(PATH_DELIMITER);
         const child = (0, import_child_process.spawn)("rg", args, {
-          env: { ...process.env, PATH: `${process.env.PATH}:${COMMON_PATHS}` },
-          signal: controller.signal
+          env: { ...process.env, PATH: newPath },
+          signal: controller.signal,
+          shell: IS_WINDOWS
+          // Benötigt für manche Windows-Environments
         });
         const rl = import_readline.default.createInterface({
           input: child.stdout,
@@ -193,7 +199,7 @@ function Command() {
                 updateTimeoutRef.current = setTimeout(() => {
                   setResults([...resultsRef.current]);
                   updateTimeoutRef.current = null;
-                }, 50);
+                }, 80);
               }
             }
           } catch (e) {
@@ -215,8 +221,8 @@ function Command() {
             clearTimeout(updateTimeoutRef.current);
             updateTimeoutRef.current = null;
           }
-          setResults([...resultsRef.current]);
-          if (resultsRef.current.length === 0 && code !== 0 && code !== 1 && !controller.signal.aborted) {
+          if (!controller.signal.aborted) {
+            setResults([...resultsRef.current]);
           }
         });
       } catch (error) {
@@ -247,12 +253,13 @@ ${errorMsg}`,
       searchBarPlaceholder: "Suchen nach Text in Dateien...",
       throttle: true,
       filtering: false,
-      isShowingDetail: results.length > 0,
+      isShowingDetail: true,
       children: [
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
           import_api.List.EmptyView,
           {
             title: isLoading ? "Suchen..." : results.length === 0 ? "Keine Ergebnisse" : "Text eingeben",
+            description: results.length === 0 && !isLoading ? "Tippe mindestens 2 Zeichen ein, um die Suche zu starten." : void 0,
             icon: import_api.Icon.MagnifyingGlass
           }
         ),
