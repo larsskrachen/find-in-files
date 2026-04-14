@@ -1,11 +1,9 @@
 import { List, ActionPanel, Action, getPreferenceValues, Icon, Detail } from "@raycast/api";
-import { useState, useCallback, useRef } from "react";
-import { exec } from "child_process";
-import { promisify } from "util";
+import { useState, useCallback, useRef, useEffect } from "react";
+import { spawn } from "child_process";
+import readline from "readline";
 import path from "path";
 import os from "os";
-
-const execPromise = promisify(exec);
 
 interface SearchResult {
   file: string;
@@ -42,24 +40,37 @@ const IGNORED_DIRS = [
 ];
 
 const COMMON_PATHS = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
+const MAX_RESULTS = 100;
 
 export default function Command() {
   const [results, setResults] = useState<SearchResult[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const resultsRef = useRef<SearchResult[]>([]);
 
   const preferences = getPreferenceValues<Preferences>();
   const searchDir = preferences.searchPath || os.homedir();
 
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+    };
+  }, []);
+
   const handleSearch = useCallback(
     async (text: string) => {
+      // Vorherige Suche abbrechen
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
       }
 
       if (!text || text.length < 2) {
         setResults([]);
+        resultsRef.current = [];
         setIsLoading(false);
         return;
       }
@@ -68,81 +79,94 @@ export default function Command() {
       abortControllerRef.current = controller;
       setIsLoading(true);
       setErrorMsg(null);
+      setResults([]);
+      resultsRef.current = [];
 
       try {
-        const globArgs = IGNORED_DIRS.map((dir) => `--iglob '!**/${dir}/**'`).join(" ");
-        // Ripgrep command
-        // --vimgrep: file:line:col:text
-        // --fixed-strings: treat pattern as literal
-        // --word-regexp: force whole word matches
-        // --case-sensitive: case matters
-        // --max-columns 500: limit long lines
-        // --max-count 10: limit results per file
-        // --max-filesize 1M: avoid huge files
-        const escapedText = text.replace(/"/g, '\\"');
-        const cmd = `rg --vimgrep --fixed-strings --word-regexp --case-sensitive --max-columns 500 --max-count 10 --max-filesize 1M --no-messages ${globArgs} "${escapedText}" "${searchDir}" | head -n 100`;
+        const ignoreArgs = IGNORED_DIRS.flatMap((dir) => ["-g", `!**/${dir}/**`]);
+        
+        // Ripgrep args:
+        // --json: hocheffizientes streaming format
+        // --fixed-strings: wörtliche suche
+        // --word-regexp: ganze wörter
+        // --case-sensitive: groß-/kleinschreibung
+        // --max-columns 500: lange zeilen kappen
+        // --max-count 10: limit pro datei
+        // --max-filesize 1M: riesige dateien ignorieren
+        // --no-messages: keine berechtigungsfehler anzeigen
+        const args = [
+          "--json",
+          "--fixed-strings",
+          "--word-regexp",
+          "--case-sensitive",
+          "--max-columns", "500",
+          "--max-count", "10",
+          "--max-filesize", "1M",
+          "--no-messages",
+          ...ignoreArgs,
+          text,
+          searchDir
+        ];
 
-        const processResults = (stdout: string) => {
-          const lines = stdout.split("\n").filter(Boolean);
-          const searchResults: SearchResult[] = lines
-            .map((line) => {
-              const parts = line.split(":");
-              if (parts.length < 4) return null;
-              const file = parts[0];
-              const lineNum = parts[1];
-              const textContent = parts.slice(3).join(":").trim();
-              return {
-                file,
-                line: lineNum,
-                text: textContent,
-              };
-            })
-            .filter((res): res is SearchResult => res !== null);
-
-          setResults(searchResults);
-        };
-
-        const { stdout } = await execPromise(cmd, {
-          timeout: 10000,
+        const child = spawn("rg", args, {
           env: { ...process.env, PATH: `${process.env.PATH}:${COMMON_PATHS}` },
-          // Signal is tricky in old node via promisify, but Raycast runs modern Node
-          signal: controller.signal as any,
+          signal: controller.signal,
         });
 
-        processResults(stdout);
-        setIsLoading(false);
-      } catch (error: any) {
-        if (error.name === "AbortError" || controller.signal.aborted) {
-          return;
-        }
+        const rl = readline.createInterface({
+          input: child.stdout,
+          terminal: false,
+        });
 
-        if (error.stdout) {
-          const lines = error.stdout.split("\n").filter(Boolean);
-          const searchResults: SearchResult[] = lines
-            .map((line: string) => {
-              const parts = line.split(":");
-              if (parts.length < 4) return null;
-              const file = parts[0];
-              const lineNum = parts[1];
-              const textContent = parts.slice(3).join(":").trim();
-              return {
-                file,
-                line: lineNum,
-                text: textContent,
+        rl.on("line", (line) => {
+          if (resultsRef.current.length >= MAX_RESULTS) {
+            child.kill();
+            rl.close();
+            return;
+          }
+
+          try {
+            const parsed = JSON.parse(line);
+            if (parsed.type === "match") {
+              const data = parsed.data;
+              const newResult: SearchResult = {
+                file: data.path.text,
+                line: data.line_number.toString(),
+                text: data.lines.text.trim(),
               };
-            })
-            .filter((res: any): res is SearchResult => res !== null);
+              
+              resultsRef.current = [...resultsRef.current, newResult];
+              // Wir nutzen ein kleines Batching oder setzen den State direkt,
+              // da Raycast's UI damit umgehen kann.
+              setResults([...resultsRef.current]);
+            }
+          } catch (e) {
+            // Ignoriere fehlerhafte JSON zeilen
+          }
+        });
 
-          setResults(searchResults);
-        } else if (error.code === 127) {
-          setErrorMsg("ripgrep (rg) wurde nicht gefunden. Bitte installiere es mit 'brew install ripgrep'.");
-        } else if (error.code !== 1 && error.code !== 2) {
-          // 1 means no results, 2 means error (e.g., some files could not be opened)
-          console.error("Search error:", error);
-        } else {
-          setResults([]);
-        }
+        child.on("error", (error: any) => {
+          if (error.name === "AbortError") return;
+          if (error.code === "ENOENT") {
+            setErrorMsg("ripgrep (rg) wurde nicht gefunden. Bitte installiere es mit 'brew install ripgrep'.");
+          } else {
+            console.error("Spawn error:", error);
+          }
+          setIsLoading(false);
+        });
+
+        child.on("close", (code) => {
+          setIsLoading(false);
+          // Wenn wir keine ergebnisse haben und der code nicht 0 ist (und nicht 1, was "keine treffer" bedeutet)
+          if (resultsRef.current.length === 0 && code !== 0 && code !== 1 && !controller.signal.aborted) {
+             // Möglicherweise ein fehler, aber wir zeigen einfach "Keine Ergebnisse" oder den bisherigen Stand
+          }
+        });
+
+      } catch (error: any) {
+        if (error.name === "AbortError") return;
         setIsLoading(false);
+        console.error("Search error:", error);
       }
     },
     [searchDir],
