@@ -20,7 +20,8 @@
   ],
   "dependencies": {
     "@raycast/api": "^1.104.12",
-    "@raycast/utils": "^1.17.0"
+    "@raycast/utils": "^1.17.0",
+    "@vscode/ripgrep": "^1.17.1"
   },
   "preferences": [
     {

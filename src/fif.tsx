@@ -1,9 +1,11 @@
-import { List, ActionPanel, Action, getPreferenceValues, Icon, Detail } from "@raycast/api";
+import { List, ActionPanel, Action, getPreferenceValues, Icon, Detail, environment } from "@raycast/api";
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { spawn } from "child_process";
 import readline from "readline";
 import path from "path";
 import os from "os";
+import { rgPath as vscodeRgPath } from "@vscode/ripgrep";
+import fs from "fs";
 
 interface SearchResult {
   file: string;
@@ -84,17 +86,64 @@ const IGNORED_DIRS = [
   "Applications",
 ];
 
-const COMMON_UNIX_PATHS = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
-const COMMON_WINDOWS_PATHS = [
-  path.join(os.homedir(), "AppData", "Local", "Microsoft", "CommandLineTools"),
-  "C:\\ProgramData\\chocolatey\\bin",
-  path.join(os.homedir(), "scoop", "shims"),
-];
 const MAX_RESULTS = 100;
 const IGNORE_ARGS = IGNORED_DIRS.flatMap((dir) => ["-g", `!**/${dir}/**`]);
 const IS_WINDOWS = os.platform() === "win32";
-const PATH_DELIMITER = path.delimiter;
-const RG_COMMAND = IS_WINDOWS ? "rg.exe" : "rg";
+
+// Ermittle den robusten Pfad zur ripgrep-Binärdatei
+function getRipgrepPath(): { path: string; testedPaths: string[] } {
+  const testedPaths: string[] = [];
+  const binName = IS_WINDOWS ? "rg.exe" : "rg";
+
+  // 1. Versuche den Pfad im Assets-Ordner (für Raycast Bundle optimiert)
+  const assetsPath = path.join(environment.assetsPath, binName);
+  testedPaths.push(`assetsPath: ${assetsPath}`);
+  if (fs.existsSync(assetsPath)) {
+    try {
+      // Stelle sicher, dass die Binärdatei ausführbar ist (wichtig für Mac/Linux)
+      if (!IS_WINDOWS) {
+        fs.chmodSync(assetsPath, "755");
+      }
+      return { path: assetsPath, testedPaths };
+    } catch (e) {
+      testedPaths.push(`chmod failed for assetsPath: ${e}`);
+    }
+  }
+
+  // 2. Versuche den Pfad aus dem Paket direkt
+  if (vscodeRgPath) {
+    testedPaths.push(`vscodeRgPath: ${vscodeRgPath}`);
+    if (fs.existsSync(vscodeRgPath)) {
+      return { path: vscodeRgPath, testedPaths };
+    }
+  }
+
+  // 3. Versuche den Pfad über require.resolve
+  try {
+    const resolvedPath = require.resolve(`@vscode/ripgrep/bin/${binName}`);
+    testedPaths.push(`require.resolve: ${resolvedPath}`);
+    if (fs.existsSync(resolvedPath)) {
+      return { path: resolvedPath, testedPaths };
+    }
+  } catch (e) {
+    testedPaths.push(`require.resolve failed`);
+  }
+
+  // 4. Versuche lokale node_modules relativ zum Command (Hilfreich bei Raycast Dev)
+  const devPath = path.join(environment.extensionPath, "node_modules", "@vscode", "ripgrep", "bin", binName);
+  testedPaths.push(`devPath: ${devPath}`);
+  if (fs.existsSync(devPath)) {
+    return { path: devPath, testedPaths };
+  }
+
+  // 5. Fallback auf systemweites ripgrep (als letzter Rettungsanker)
+  const fallback = IS_WINDOWS ? "rg.exe" : "rg";
+  testedPaths.push(`fallback: ${fallback}`);
+  return { path: fallback, testedPaths };
+}
+
+const rgInfo = getRipgrepPath();
+const rgPath = rgInfo.path;
 
 export default function Command() {
   const [results, setResults] = useState<SearchResult[]>([]);
@@ -147,15 +196,9 @@ export default function Command() {
           searchDir
         ];
 
-        // Prepare PATH
-        const currentPath = process.env.PATH || "";
-        const extraPaths = IS_WINDOWS ? COMMON_WINDOWS_PATHS : COMMON_UNIX_PATHS;
-        const newPath = [...currentPath.split(PATH_DELIMITER), ...extraPaths].join(PATH_DELIMITER);
-
-        const child = spawn(RG_COMMAND, args, {
-          env: { ...process.env, PATH: newPath },
+        const child = spawn(rgPath, args, {
           signal: controller.signal,
-          shell: IS_WINDOWS, // Benötigt für manche Windows-Environments
+          shell: IS_WINDOWS,
         });
 
         const rl = readline.createInterface({
@@ -202,8 +245,9 @@ export default function Command() {
         child.on("error", (error: any) => {
           if (error.name === "AbortError") return;
           if (error.code === "ENOENT") {
+            const pathsInfo = rgInfo.testedPaths.map(p => `- ${p}`).join("\n");
             setErrorMsg(
-              `ripgrep (${RG_COMMAND}) wurde nicht gefunden. Bitte installiere es mit 'brew install ripgrep' (macOS) oder 'choco install ripgrep' / 'scoop install ripgrep' (Windows).`
+              `ripgrep konnte nicht unter dem Pfad "${rgPath}" gestartet werden. Das integrierte Paket scheint beschädigt zu sein oder die Binärdatei fehlt.\n\nGeprüfte Pfade:\n${pathsInfo}`
             );
           } else {
             console.error("Spawn error:", error);
