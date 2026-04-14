@@ -35,11 +35,10 @@ module.exports = __toCommonJS(fif_exports);
 var import_api = require("@raycast/api");
 var import_react = require("react");
 var import_child_process = require("child_process");
-var import_util = require("util");
+var import_readline = __toESM(require("readline"));
 var import_path = __toESM(require("path"));
 var import_os = __toESM(require("os"));
 var import_jsx_runtime = require("react/jsx-runtime");
-var execPromise = (0, import_util.promisify)(import_child_process.exec);
 var IGNORED_DIRS = [
   "node_modules",
   ".node_modules",
@@ -61,23 +60,83 @@ var IGNORED_DIRS = [
   "Movies",
   ".Trash",
   ".cache",
-  ".npm"
+  ".npm",
+  ".idea",
+  ".vscode",
+  ".settings",
+  ".gradle",
+  ".m2",
+  "bower_components",
+  "__pycache__",
+  ".pytest_cache",
+  ".sass-cache",
+  "Pods",
+  "DerivedData",
+  ".yarn",
+  ".pnpm",
+  ".pnpm-store",
+  "jspm_packages",
+  ".composer",
+  ".fleet",
+  ".cursor",
+  ".vscode-server",
+  ".history",
+  ".metadata",
+  ".recommenders",
+  ".nuxt",
+  ".docusaurus",
+  ".turbo",
+  ".vercel",
+  ".expo",
+  "_build",
+  ".elixir_ls",
+  ".mypy_cache",
+  ".ruff_cache",
+  "coverage",
+  ".nyc_output",
+  ".tox",
+  ".nox",
+  ".terraform",
+  ".serverless",
+  ".aws",
+  ".azure",
+  ".gcloud",
+  ".kube",
+  ".docker",
+  ".minikube",
+  ".zsh_sessions",
+  "Applications"
 ];
 var COMMON_PATHS = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
+var MAX_RESULTS = 100;
 function Command() {
   const [results, setResults] = (0, import_react.useState)([]);
   const [isLoading, setIsLoading] = (0, import_react.useState)(false);
   const [errorMsg, setErrorMsg] = (0, import_react.useState)(null);
   const abortControllerRef = (0, import_react.useRef)(null);
+  const updateTimeoutRef = (0, import_react.useRef)(null);
+  const resultsRef = (0, import_react.useRef)([]);
   const preferences = (0, import_api.getPreferenceValues)();
   const searchDir = preferences.searchPath || import_os.default.homedir();
+  (0, import_react.useEffect)(() => {
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+    };
+  }, []);
   const handleSearch = (0, import_react.useCallback)(
     async (text) => {
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
       }
+      if (updateTimeoutRef.current) {
+        clearTimeout(updateTimeoutRef.current);
+        updateTimeoutRef.current = null;
+      }
       if (!text || text.length < 2) {
         setResults([]);
+        resultsRef.current = [];
         setIsLoading(false);
         return;
       }
@@ -85,63 +144,86 @@ function Command() {
       abortControllerRef.current = controller;
       setIsLoading(true);
       setErrorMsg(null);
+      setResults([]);
+      resultsRef.current = [];
       try {
-        const globArgs = IGNORED_DIRS.map((dir) => `--iglob '!**/${dir}/**'`).join(" ");
-        const escapedText = text.replace(/"/g, '\\"');
-        const cmd = `rg --vimgrep --fixed-strings --word-regexp --case-sensitive --max-columns 500 --max-count 10 --max-filesize 1M --no-messages ${globArgs} "${escapedText}" "${searchDir}" | head -n 100`;
-        const processResults = (stdout2) => {
-          const lines = stdout2.split("\n").filter(Boolean);
-          const searchResults = lines.map((line) => {
-            const parts = line.split(":");
-            if (parts.length < 4)
-              return null;
-            const file = parts[0];
-            const lineNum = parts[1];
-            const textContent = parts.slice(3).join(":").trim();
-            return {
-              file,
-              line: lineNum,
-              text: textContent
-            };
-          }).filter((res) => res !== null);
-          setResults(searchResults);
-        };
-        const { stdout } = await execPromise(cmd, {
-          timeout: 1e4,
+        const ignoreArgs = IGNORED_DIRS.flatMap((dir) => ["-g", `!**/${dir}/**`]);
+        const args = [
+          "--json",
+          "--fixed-strings",
+          "--word-regexp",
+          "--case-sensitive",
+          "--max-columns",
+          "500",
+          "--max-count",
+          "5",
+          "--max-filesize",
+          "1M",
+          "--no-messages",
+          "--no-unicode",
+          ...ignoreArgs,
+          text,
+          searchDir
+        ];
+        const child = (0, import_child_process.spawn)("rg", args, {
           env: { ...process.env, PATH: `${process.env.PATH}:${COMMON_PATHS}` },
-          // Signal is tricky in old node via promisify, but Raycast runs modern Node
           signal: controller.signal
         });
-        processResults(stdout);
-        setIsLoading(false);
+        const rl = import_readline.default.createInterface({
+          input: child.stdout,
+          terminal: false
+        });
+        rl.on("line", (line) => {
+          if (resultsRef.current.length >= MAX_RESULTS) {
+            child.kill();
+            rl.close();
+            return;
+          }
+          try {
+            const parsed = JSON.parse(line);
+            if (parsed.type === "match") {
+              const data = parsed.data;
+              const newResult = {
+                file: data.path.text,
+                line: data.line_number.toString(),
+                text: data.lines.text.trim()
+              };
+              resultsRef.current.push(newResult);
+              if (!updateTimeoutRef.current) {
+                updateTimeoutRef.current = setTimeout(() => {
+                  setResults([...resultsRef.current]);
+                  updateTimeoutRef.current = null;
+                }, 50);
+              }
+            }
+          } catch (e) {
+          }
+        });
+        child.on("error", (error) => {
+          if (error.name === "AbortError")
+            return;
+          if (error.code === "ENOENT") {
+            setErrorMsg("ripgrep (rg) wurde nicht gefunden. Bitte installiere es mit 'brew install ripgrep'.");
+          } else {
+            console.error("Spawn error:", error);
+          }
+          setIsLoading(false);
+        });
+        child.on("close", (code) => {
+          setIsLoading(false);
+          if (updateTimeoutRef.current) {
+            clearTimeout(updateTimeoutRef.current);
+            updateTimeoutRef.current = null;
+          }
+          setResults([...resultsRef.current]);
+          if (resultsRef.current.length === 0 && code !== 0 && code !== 1 && !controller.signal.aborted) {
+          }
+        });
       } catch (error) {
-        if (error.name === "AbortError" || controller.signal.aborted) {
+        if (error.name === "AbortError")
           return;
-        }
-        if (error.stdout) {
-          const lines = error.stdout.split("\n").filter(Boolean);
-          const searchResults = lines.map((line) => {
-            const parts = line.split(":");
-            if (parts.length < 4)
-              return null;
-            const file = parts[0];
-            const lineNum = parts[1];
-            const textContent = parts.slice(3).join(":").trim();
-            return {
-              file,
-              line: lineNum,
-              text: textContent
-            };
-          }).filter((res) => res !== null);
-          setResults(searchResults);
-        } else if (error.code === 127) {
-          setErrorMsg("ripgrep (rg) wurde nicht gefunden. Bitte installiere es mit 'brew install ripgrep'.");
-        } else if (error.code !== 1 && error.code !== 2) {
-          console.error("Search error:", error);
-        } else {
-          setResults([]);
-        }
         setIsLoading(false);
+        console.error("Search error:", error);
       }
     },
     [searchDir]
@@ -165,6 +247,7 @@ ${errorMsg}`,
       searchBarPlaceholder: "Suchen nach Text in Dateien...",
       throttle: true,
       filtering: false,
+      isShowingDetail: results.length > 0,
       children: [
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
           import_api.List.EmptyView,
@@ -177,13 +260,44 @@ ${errorMsg}`,
           import_api.List.Item,
           {
             title: res.text,
-            subtitle: `${import_path.default.basename(res.file)}:${res.line}`,
-            accessories: [{ text: import_path.default.dirname(res.file).replace(import_os.default.homedir(), "~") }],
+            subtitle: import_path.default.basename(res.file),
+            detail: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+              import_api.List.Item.Detail,
+              {
+                markdown: `
+### ${import_path.default.basename(res.file)}
+**Pfad:** \`${res.file.replace(import_os.default.homedir(), "~")}\`
+**Zeile:** ${res.line}
+
+\`\`\`
+${res.text}
+\`\`\`
+              `,
+                metadata: /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_api.List.Item.Detail.Metadata, { children: [
+                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_api.List.Item.Detail.Metadata.Label, { title: "Datei", text: import_path.default.basename(res.file) }),
+                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_api.List.Item.Detail.Metadata.Label, { title: "Pfad", text: res.file.replace(import_os.default.homedir(), "~") }),
+                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_api.List.Item.Detail.Metadata.Label, { title: "Zeile", text: res.line }),
+                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_api.List.Item.Detail.Metadata.Separator, {}),
+                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_api.List.Item.Detail.Metadata.Label, { title: "Gefundener Text", text: res.text })
+                ] })
+              }
+            ),
             actions: /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_api.ActionPanel, { children: [
               /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_api.Action.Open, { title: "In Editor \xF6ffnen", target: res.file }),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_api.Action.OpenWith, { path: res.file, title: "\xD6ffnen mit..." }),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_api.Action.Open, { title: "In Antigravity \xF6ffnen", target: res.file, application: "Antigravity", icon: import_api.Icon.Code }),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_api.ActionPanel.Submenu, { title: "In JetBrains IDE \xF6ffnen", icon: import_api.Icon.Code, children: [
+                /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_api.Action.Open, { title: "IntelliJ IDEA", target: res.file, application: "IntelliJ IDEA" }),
+                /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_api.Action.Open, { title: "WebStorm", target: res.file, application: "WebStorm" }),
+                /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_api.Action.Open, { title: "PyCharm", target: res.file, application: "PyCharm" }),
+                /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_api.Action.Open, { title: "PhpStorm", target: res.file, application: "PhpStorm" }),
+                /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_api.Action.Open, { title: "GoLand", target: res.file, application: "GoLand" }),
+                /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_api.Action.Open, { title: "CLion", target: res.file, application: "CLion" }),
+                /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_api.Action.Open, { title: "Rider", target: res.file, application: "Rider" })
+              ] }),
               /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_api.Action.ShowInFinder, { path: res.file }),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_api.Action.CopyToClipboard, { title: "Pfad kopieren", content: res.file }),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_api.Action.CopyToClipboard, { title: "Text kopieren", content: res.text })
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_api.Action.CopyToClipboard, { title: "Pfad kopieren", content: res.file, shortcut: { modifiers: ["cmd", "shift"], key: "c" } }),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_api.Action.CopyToClipboard, { title: "Text kopieren", content: res.text, shortcut: { modifiers: ["cmd"], key: "c" } })
             ] })
           },
           `${res.file}-${res.line}-${index}`

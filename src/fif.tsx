@@ -257,6 +257,7 @@ export default function Command() {
       searchBarPlaceholder="Suchen nach Text in Dateien..."
       throttle={true}
       filtering={false}
+      isShowingDetail={results.length > 0}
     >
       <List.EmptyView 
         title={isLoading ? "Suchen..." : results.length === 0 ? "Keine Ergebnisse" : "Text eingeben"} 
@@ -266,14 +267,46 @@ export default function Command() {
         <List.Item
           key={`${res.file}-${res.line}-${index}`}
           title={res.text}
-          subtitle={`${path.basename(res.file)}:${res.line}`}
-          accessories={[{ text: path.dirname(res.file).replace(os.homedir(), "~") }]}
+          subtitle={path.basename(res.file)}
+          detail={
+            <List.Item.Detail
+              markdown={`
+### ${path.basename(res.file)}
+**Pfad:** \`${res.file.replace(os.homedir(), "~")}\`
+**Zeile:** ${res.line}
+
+\`\`\`
+${res.text}
+\`\`\`
+              `}
+              metadata={
+                <List.Item.Detail.Metadata>
+                  <List.Item.Detail.Metadata.Label title="Datei" text={path.basename(res.file)} />
+                  <List.Item.Detail.Metadata.Label title="Pfad" text={res.file.replace(os.homedir(), "~")} />
+                  <List.Item.Detail.Metadata.Label title="Zeile" text={res.line} />
+                  <List.Item.Detail.Metadata.Separator />
+                  <List.Item.Detail.Metadata.Label title="Gefundener Text" text={res.text} />
+                </List.Item.Detail.Metadata>
+              }
+            />
+          }
           actions={
             <ActionPanel>
               <Action.Open title="In Editor öffnen" target={res.file} />
+              <Action.OpenWith path={res.file} title="Öffnen mit..." />
+              <Action.Open title="In Antigravity öffnen" target={res.file} application="Antigravity" icon={Icon.Code} />
+              <ActionPanel.Submenu title="In JetBrains IDE öffnen" icon={Icon.Code}>
+                <Action.Open title="IntelliJ IDEA" target={res.file} application="IntelliJ IDEA" />
+                <Action.Open title="WebStorm" target={res.file} application="WebStorm" />
+                <Action.Open title="PyCharm" target={res.file} application="PyCharm" />
+                <Action.Open title="PhpStorm" target={res.file} application="PhpStorm" />
+                <Action.Open title="GoLand" target={res.file} application="GoLand" />
+                <Action.Open title="CLion" target={res.file} application="CLion" />
+                <Action.Open title="Rider" target={res.file} application="Rider" />
+              </ActionPanel.Submenu>
               <Action.ShowInFinder path={res.file} />
-              <Action.CopyToClipboard title="Pfad kopieren" content={res.file} />
-              <Action.CopyToClipboard title="Text kopieren" content={res.text} />
+              <Action.CopyToClipboard title="Pfad kopieren" content={res.file} shortcut={{ modifiers: ["cmd", "shift"], key: "c" }} />
+              <Action.CopyToClipboard title="Text kopieren" content={res.text} shortcut={{ modifiers: ["cmd"], key: "c" }} />
             </ActionPanel>
           }
         />

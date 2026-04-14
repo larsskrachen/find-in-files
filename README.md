@@ -8,12 +8,15 @@ Eine hocheffiziente Raycast-Erweiterung für die blitzschnelle Volltextsuche inn
 - **Echtzeit-Ergebnisse**: Suchergebnisse werden gestreamt und sofort angezeigt, sobald sie gefunden werden.
 - **Intelligente Filterung**: Ignoriert automatisch `node_modules`, `.venv`, `Library`, `Caches`, `.git`, `dist`, `build` und viele weitere Systemverzeichnisse.
 - **Exakte Suche**: Findet exakt den eingegebenen Begriff (keine Fuzzy-Suche im Dateicontent).
-- **Integrierte Vorschau**: Schnelles Durchsuchen der Fundstellen mit Dateipfad und Zeilennummer.
-- **Aktionen**:
+- **Integrierte Vorschau**: Permanentes Detail-Fenster mit Dateipfad, Zeilennummer und Code-Vorschau für den schnellen Überblick.
+- **Erweiterte Aktionen**:
   - In Standard-Editor öffnen.
+  - Öffnen mit... (Manuelle App-Auswahl).
+  - In Antigravity öffnen.
+  - In JetBrains IDEs öffnen (IntelliJ, WebStorm, PyCharm etc.).
   - Im Finder anzeigen.
-  - Pfad in die Zwischenablage kopieren.
-  - Textinhalt kopieren.
+  - Pfad in die Zwischenablage kopieren (Cmd+Shift+C).
+  - Textinhalt kopieren (Cmd+C).
 
 ## Voraussetzungen
 
