@@ -85,16 +85,24 @@ const IGNORED_DIRS = [
 ];
 
 const COMMON_UNIX_PATHS = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
+const COMMON_WINDOWS_PATHS = [
+  path.join(os.homedir(), "AppData", "Local", "Microsoft", "CommandLineTools"),
+  "C:\\ProgramData\\chocolatey\\bin",
+  path.join(os.homedir(), "scoop", "shims"),
+];
 const MAX_RESULTS = 100;
 const IGNORE_ARGS = IGNORED_DIRS.flatMap((dir) => ["-g", `!**/${dir}/**`]);
 const IS_WINDOWS = os.platform() === "win32";
 const PATH_DELIMITER = path.delimiter;
+const RG_COMMAND = IS_WINDOWS ? "rg.exe" : "rg";
 
 export default function Command() {
   const [results, setResults] = useState<SearchResult[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [searchText, setSearchText] = useState("");
   const abortControllerRef = useRef<AbortController | null>(null);
+  const searchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const updateTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const resultsRef = useRef<SearchResult[]>([]);
 
@@ -110,47 +118,30 @@ export default function Command() {
     };
   }, []);
 
-  const handleSearch = useCallback(
+  const performSearch = useCallback(
     async (text: string) => {
-      // Vorherige Suche abbrechen
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
-      }
-
-      if (updateTimeoutRef.current) {
-        clearTimeout(updateTimeoutRef.current);
-        updateTimeoutRef.current = null;
-      }
-
-      if (!text || text.length < 2) {
-        setResults([]);
-        resultsRef.current = [];
-        setIsLoading(false);
-        return;
       }
 
       const controller = new AbortController();
       abortControllerRef.current = controller;
       
-      // Wir leeren die UI nicht sofort (setResults([]) entfernt), 
-      // damit das Tippen flüssiger wirkt (kein Flackern).
-      // Die neuen Ergebnisse ersetzen die alten, sobald der erste Treffer da ist.
       setIsLoading(true);
       setErrorMsg(null);
       resultsRef.current = [];
 
       try {
-        // Ripgrep args
         const args = [
           "--json",
+          "--smart-case",
           "--fixed-strings",
-          "--word-regexp",
-          "--case-sensitive",
           "--max-columns", "500",
           "--max-count", "5",
           "--max-filesize", "1M",
           "--no-messages",
           "--no-unicode",
+          "--no-config",
           ...IGNORE_ARGS,
           text,
           searchDir
@@ -158,10 +149,10 @@ export default function Command() {
 
         // Prepare PATH
         const currentPath = process.env.PATH || "";
-        const extraPaths = IS_WINDOWS ? [] : COMMON_UNIX_PATHS;
+        const extraPaths = IS_WINDOWS ? COMMON_WINDOWS_PATHS : COMMON_UNIX_PATHS;
         const newPath = [...currentPath.split(PATH_DELIMITER), ...extraPaths].join(PATH_DELIMITER);
 
-        const child = spawn("rg", args, {
+        const child = spawn(RG_COMMAND, args, {
           env: { ...process.env, PATH: newPath },
           signal: controller.signal,
           shell: IS_WINDOWS, // Benötigt für manche Windows-Environments
@@ -172,10 +163,14 @@ export default function Command() {
           terminal: false,
         });
 
+        let isKilled = false;
         rl.on("line", (line) => {
-          if (resultsRef.current.length >= MAX_RESULTS) {
-            child.kill();
-            rl.close();
+          if (isKilled || resultsRef.current.length >= MAX_RESULTS) {
+            if (!isKilled) {
+              isKilled = true;
+              child.kill();
+              rl.close();
+            }
             return;
           }
 
@@ -207,7 +202,9 @@ export default function Command() {
         child.on("error", (error: any) => {
           if (error.name === "AbortError") return;
           if (error.code === "ENOENT") {
-            setErrorMsg("ripgrep (rg) wurde nicht gefunden. Bitte installiere es mit 'brew install ripgrep'.");
+            setErrorMsg(
+              `ripgrep (${RG_COMMAND}) wurde nicht gefunden. Bitte installiere es mit 'brew install ripgrep' (macOS) oder 'choco install ripgrep' / 'scoop install ripgrep' (Windows).`
+            );
           } else {
             console.error("Spawn error:", error);
           }
@@ -237,6 +234,32 @@ export default function Command() {
     [searchDir],
   );
 
+  useEffect(() => {
+    if (searchTimeoutRef.current) {
+      clearTimeout(searchTimeoutRef.current);
+    }
+
+    if (!searchText || searchText.length < 2) {
+      setResults([]);
+      resultsRef.current = [];
+      setIsLoading(false);
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+      return;
+    }
+
+    searchTimeoutRef.current = setTimeout(() => {
+      performSearch(searchText);
+    }, 300);
+
+    return () => {
+      if (searchTimeoutRef.current) {
+        clearTimeout(searchTimeoutRef.current);
+      }
+    };
+  }, [searchText, performSearch]);
+
   if (errorMsg) {
     return (
       <Detail
@@ -253,9 +276,8 @@ export default function Command() {
   return (
     <List
       isLoading={isLoading}
-      onSearchTextChange={handleSearch}
+      onSearchTextChange={setSearchText}
       searchBarPlaceholder="Suchen nach Text in Dateien..."
-      throttle={true}
       filtering={false}
       isShowingDetail={true}
     >
@@ -295,7 +317,7 @@ ${res.text}
             <ActionPanel>
               <Action.Open title="In Editor öffnen" target={res.file} />
               <Action.OpenWith path={res.file} title="Öffnen mit..." />
-              <Action.Open title="In Antigravity öffnen" target={res.file} application="Antigravity" icon={Icon.Code} />
+              <Action.Open title="In Google Antigravity öffnen" target={res.file} application="Google Antigravity" icon={Icon.Code} />
               <ActionPanel.Submenu title="In JetBrains IDE öffnen" icon={Icon.Code}>
                 <Action.Open title="IntelliJ IDEA" target={res.file} application="IntelliJ IDEA" />
                 <Action.Open title="WebStorm" target={res.file} application="WebStorm" />

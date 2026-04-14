@@ -108,10 +108,16 @@ var IGNORED_DIRS = [
   "Applications"
 ];
 var COMMON_UNIX_PATHS = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
+var COMMON_WINDOWS_PATHS = [
+  import_path.default.join(import_os.default.homedir(), "AppData", "Local", "Microsoft", "CommandLineTools"),
+  "C:\\ProgramData\\chocolatey\\bin",
+  import_path.default.join(import_os.default.homedir(), "scoop", "shims")
+];
 var MAX_RESULTS = 100;
 var IGNORE_ARGS = IGNORED_DIRS.flatMap((dir) => ["-g", `!**/${dir}/**`]);
 var IS_WINDOWS = import_os.default.platform() === "win32";
 var PATH_DELIMITER = import_path.default.delimiter;
+var RG_COMMAND = IS_WINDOWS ? "rg.exe" : "rg";
 function Command() {
   const [results, setResults] = (0, import_react.useState)([]);
   const [isLoading, setIsLoading] = (0, import_react.useState)(false);
@@ -167,9 +173,9 @@ function Command() {
           searchDir
         ];
         const currentPath = process.env.PATH || "";
-        const extraPaths = IS_WINDOWS ? [] : COMMON_UNIX_PATHS;
+        const extraPaths = IS_WINDOWS ? COMMON_WINDOWS_PATHS : COMMON_UNIX_PATHS;
         const newPath = [...currentPath.split(PATH_DELIMITER), ...extraPaths].join(PATH_DELIMITER);
-        const child = (0, import_child_process.spawn)("rg", args, {
+        const child = (0, import_child_process.spawn)(RG_COMMAND, args, {
           env: { ...process.env, PATH: newPath },
           signal: controller.signal,
           shell: IS_WINDOWS
@@ -209,7 +215,9 @@ function Command() {
           if (error.name === "AbortError")
             return;
           if (error.code === "ENOENT") {
-            setErrorMsg("ripgrep (rg) wurde nicht gefunden. Bitte installiere es mit 'brew install ripgrep'.");
+            setErrorMsg(
+              `ripgrep (${RG_COMMAND}) wurde nicht gefunden. Bitte installiere es mit 'brew install ripgrep' (macOS) oder 'choco install ripgrep' / 'scoop install ripgrep' (Windows).`
+            );
           } else {
             console.error("Spawn error:", error);
           }
@@ -251,7 +259,6 @@ ${errorMsg}`,
       isLoading,
       onSearchTextChange: handleSearch,
       searchBarPlaceholder: "Suchen nach Text in Dateien...",
-      throttle: true,
       filtering: false,
       isShowingDetail: true,
       children: [
@@ -292,7 +299,7 @@ ${res.text}
             actions: /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_api.ActionPanel, { children: [
               /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_api.Action.Open, { title: "In Editor \xF6ffnen", target: res.file }),
               /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_api.Action.OpenWith, { path: res.file, title: "\xD6ffnen mit..." }),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_api.Action.Open, { title: "In Antigravity \xF6ffnen", target: res.file, application: "Antigravity", icon: import_api.Icon.Code }),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_api.Action.Open, { title: "In Google Antigravity \xF6ffnen", target: res.file, application: "Google Antigravity", icon: import_api.Icon.Code }),
               /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_api.ActionPanel.Submenu, { title: "In JetBrains IDE \xF6ffnen", icon: import_api.Icon.Code, children: [
                 /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_api.Action.Open, { title: "IntelliJ IDEA", target: res.file, application: "IntelliJ IDEA" }),
                 /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_api.Action.Open, { title: "WebStorm", target: res.file, application: "WebStorm" }),
