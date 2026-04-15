@@ -1,4 +1,4 @@
-import { List, ActionPanel, Action, getPreferenceValues, Icon, Detail, environment } from "@raycast/api";
+import { List, ActionPanel, Action, getPreferenceValues, Icon, Detail, environment, LocalStorage } from "@raycast/api";
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { spawn } from "child_process";
 import readline from "readline";
@@ -11,6 +11,7 @@ interface SearchResult {
   file: string;
   line: string;
   text: string;
+  score?: number;
 }
 
 interface Preferences {
@@ -24,13 +25,18 @@ const IGNORED_DIRS = [
   "venv",
   "logs",
   "temp",
+  "tmp",
   ".git",
+  ".svn",
+  ".hg",
   "dist",
   "build",
+  "out",
   ".next",
   "vendor",
   "target",
   "bin",
+  "sbin",
   "obj",
   "Library",
   "Pictures",
@@ -38,6 +44,7 @@ const IGNORED_DIRS = [
   "Movies",
   ".Trash",
   ".cache",
+  "Caches",
   ".npm",
   ".idea",
   ".vscode",
@@ -84,11 +91,60 @@ const IGNORED_DIRS = [
   ".minikube",
   ".zsh_sessions",
   "Applications",
+  "System",
+  "Volumes",
+  "private",
+  "dev",
+  "etc",
+  "opt",
+  "var",
+  "usr",
+  "boot",
+  "mnt",
+  "media",
+  "srv",
+  "run",
+  ".cargo",
+  ".rustup",
+  ".npm-global",
+  ".nvm",
+  ".rbenv",
+  ".asdf",
+  ".pyenv",
+  ".oh-my-zsh",
+  ".bun",
+  ".deno",
+  "debug",
+  "release",
+  "ipch",
+  ".output",
+  ".wrangler",
+  ".svelte-kit",
+  ".parcel-cache",
+  ".eslintcache",
+  ".stylelintcache",
+  "dist-ssr",
+  ".yarn/cache",
+  ".yarn/unplugged",
+  "go",
+  "miniconda3",
 ];
 
 const MAX_RESULTS = 100;
 const IGNORE_ARGS = IGNORED_DIRS.flatMap((dir) => ["-g", `!**/${dir}/**`]);
 const IS_WINDOWS = os.platform() === "win32";
+const IS_MACOS = os.platform() === "darwin";
+
+// Usage tracking helpers
+async function getUsageCount(filePath: string): Promise<number> {
+  const count = await LocalStorage.getItem<number>(`usage:${filePath}`);
+  return count || 0;
+}
+
+async function incrementUsage(filePath: string) {
+  const count = await getUsageCount(filePath);
+  await LocalStorage.setItem(`usage:${filePath}`, count + 1);
+}
 
 // Ermittle den robusten Pfad zur ripgrep-Binärdatei
 function getRipgrepPath(): { path: string; testedPaths: string[] } {
@@ -180,21 +236,34 @@ export default function Command() {
       setErrorMsg(null);
       resultsRef.current = [];
 
-      try {
+      // Regex für Wortgrenzen-Match im Dateinamen vorbereiten (Case-Insensitive)
+      const escapedText = text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const wordBoundaryRegex = new RegExp(`\\b${escapedText}\\b`, "i");
+
+      const runRipgrep = (candidateFiles?: string[]) => {
         const args = [
           "--json",
-          "--smart-case",
-          "--fixed-strings",
+          "--fixed-strings", // "100% match" - kein Regex
+          "--word-regexp", // Nur ganze Wörter
+          "--ignore-case", // Groß-/Kleinschreibung ignorieren
+          "--hidden", // Versteckte Dateien (Dotfiles) einschließen
+          "--no-ignore", // .gitignore ignorieren (für site-packages etc)
           "--max-columns", "500",
-          "--max-count", "5",
+          "--max-count", "3", // Reduziere pro-Datei-Treffer für bessere Übersicht
           "--max-filesize", "1M",
           "--no-messages",
           "--no-unicode",
           "--no-config",
           ...IGNORE_ARGS,
           text,
-          searchDir
         ];
+
+        if (!candidateFiles) {
+          args.push(searchDir);
+        } else {
+          // Begrenze auf 200 Dateien, um ARG_MAX sicher zu umgehen
+          args.push(...candidateFiles.slice(0, 200));
+        }
 
         const child = spawn(rgPath, args, {
           signal: controller.signal,
@@ -207,7 +276,7 @@ export default function Command() {
         });
 
         let isKilled = false;
-        rl.on("line", (line) => {
+        rl.on("line", async (line) => {
           if (isKilled || resultsRef.current.length >= MAX_RESULTS) {
             if (!isKilled) {
               isKilled = true;
@@ -221,15 +290,31 @@ export default function Command() {
             const parsed = JSON.parse(line);
             if (parsed.type === "match") {
               const data = parsed.data;
+              const filePath = data.path.text;
+              const fileName = path.basename(filePath);
+              
+              // Scoring-Logik (Case-Insensitive Whole Word Match)
+              let score = 0;
+              // Dateiname Match (Nur ganze Wörter, Case-Insensitive)
+              if (wordBoundaryRegex.test(fileName)) score += 100;
+              
+              // Usage-Score asynchron abrufen
+              const usageCount = await getUsageCount(filePath);
+              score += usageCount * 50;
+
               const newResult: SearchResult = {
-                file: data.path.text,
+                file: filePath,
                 line: data.line_number.toString(),
                 text: data.lines.text.trim(),
+                score: score,
               };
               
               resultsRef.current.push(newResult);
 
-              // Batched UI updates: Update every 80ms (optimiert für Flüssigkeit)
+              // Sortieren nach Score
+              resultsRef.current.sort((a, b) => (b.score || 0) - (a.score || 0));
+
+              // Batched UI updates
               if (!updateTimeoutRef.current) {
                 updateTimeoutRef.current = setTimeout(() => {
                   setResults([...resultsRef.current]);
@@ -257,17 +342,58 @@ export default function Command() {
 
         child.on("close", (code) => {
           setIsLoading(false);
-          // Letztes Update erzwingen
           if (updateTimeoutRef.current) {
             clearTimeout(updateTimeoutRef.current);
             updateTimeoutRef.current = null;
           }
-          
-          // Wenn der Prozess fertig ist und wir keine neuen Ergebnisse haben, leeren wir die Liste
           if (!controller.signal.aborted) {
             setResults([...resultsRef.current]);
           }
         });
+
+        return child;
+      };
+
+      try {
+        if (IS_MACOS) {
+          // Stage 1: macOS Spotlight Index nutzen
+          // Hinweis: mdfind ist oft case-insensitive, ripgrep filtert dann case-sensitive nach.
+          const mdfind = spawn("mdfind", ["-onlyin", searchDir, text], {
+            signal: controller.signal
+          });
+
+          const rlMdfind = readline.createInterface({
+            input: mdfind.stdout,
+            terminal: false,
+          });
+
+          const candidatePaths: string[] = [];
+          rlMdfind.on("line", (filePath) => {
+            // Ignoriere Verzeichnisse und ausgeschlossene Pfade
+            if (IGNORED_DIRS.some(dir => filePath.includes(`/${dir}/`))) return;
+            candidatePaths.push(filePath);
+          });
+
+          mdfind.on("close", (code) => {
+            if (controller.signal.aborted) return;
+            
+            if (code === 0 && candidatePaths.length > 0) {
+              runRipgrep(candidatePaths);
+            } else {
+              // Fallback auf Full Ripgrep Scan
+              runRipgrep();
+            }
+          });
+
+          mdfind.on("error", (err) => {
+            if (err.name === "AbortError") return;
+            console.error("mdfind error:", err);
+            runRipgrep(); // Fallback
+          });
+
+        } else {
+          runRipgrep();
+        }
 
       } catch (error: any) {
         if (error.name === "AbortError") return;
@@ -359,21 +485,31 @@ ${res.text}
           }
           actions={
             <ActionPanel>
-              <Action.Open title="In Editor öffnen" target={res.file} />
-              <Action.OpenWith path={res.file} title="Öffnen mit..." />
-              <Action.Open title="In Google Antigravity öffnen" target={res.file} application="Google Antigravity" icon={Icon.Code} />
+              <Action.Open title="In Editor öffnen" target={res.file} onOpen={() => incrementUsage(res.file)} />
+              <Action.OpenWith path={res.file} title="Öffnen mit..." onOpen={() => incrementUsage(res.file)} />
+              <Action.Open title="In Google Antigravity öffnen" target={res.file} application="Google Antigravity" icon={Icon.Code} onOpen={() => incrementUsage(res.file)} />
               <ActionPanel.Submenu title="In JetBrains IDE öffnen" icon={Icon.Code}>
-                <Action.Open title="IntelliJ IDEA" target={res.file} application="IntelliJ IDEA" />
-                <Action.Open title="WebStorm" target={res.file} application="WebStorm" />
-                <Action.Open title="PyCharm" target={res.file} application="PyCharm" />
-                <Action.Open title="PhpStorm" target={res.file} application="PhpStorm" />
-                <Action.Open title="GoLand" target={res.file} application="GoLand" />
-                <Action.Open title="CLion" target={res.file} application="CLion" />
-                <Action.Open title="Rider" target={res.file} application="Rider" />
+                <Action.Open title="IntelliJ IDEA" target={res.file} application="IntelliJ IDEA" onOpen={() => incrementUsage(res.file)} />
+                <Action.Open title="WebStorm" target={res.file} application="WebStorm" onOpen={() => incrementUsage(res.file)} />
+                <Action.Open title="PyCharm" target={res.file} application="PyCharm" onOpen={() => incrementUsage(res.file)} />
+                <Action.Open title="PhpStorm" target={res.file} application="PhpStorm" onOpen={() => incrementUsage(res.file)} />
+                <Action.Open title="GoLand" target={res.file} application="GoLand" onOpen={() => incrementUsage(res.file)} />
+                <Action.Open title="CLion" target={res.file} application="CLion" onOpen={() => incrementUsage(res.file)} />
+                <Action.Open title="Rider" target={res.file} application="Rider" onOpen={() => incrementUsage(res.file)} />
               </ActionPanel.Submenu>
-              <Action.ShowInFinder path={res.file} />
-              <Action.CopyToClipboard title="Pfad kopieren" content={res.file} shortcut={{ modifiers: ["cmd", "shift"], key: "c" }} />
-              <Action.CopyToClipboard title="Text kopieren" content={res.text} shortcut={{ modifiers: ["cmd"], key: "c" }} />
+              <Action.ShowInFinder path={res.file} onOpen={() => incrementUsage(res.file)} />
+              <Action.CopyToClipboard 
+                title="Pfad kopieren" 
+                content={res.file} 
+                shortcut={{ modifiers: ["cmd", "shift"], key: "c" }} 
+                onCopy={() => incrementUsage(res.file)}
+              />
+              <Action.CopyToClipboard 
+                title="Text kopieren" 
+                content={res.text} 
+                shortcut={{ modifiers: ["cmd"], key: "c" }} 
+                onCopy={() => incrementUsage(res.file)}
+              />
             </ActionPanel>
           }
         />
