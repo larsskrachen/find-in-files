@@ -141,9 +141,11 @@ async function getUsageCount(filePath: string): Promise<number> {
   return count || 0;
 }
 
-async function incrementUsage(filePath: string) {
+async function incrementUsage(filePath: string, cache?: Map<string, number>) {
   const count = await getUsageCount(filePath);
-  await LocalStorage.setItem(`usage:${filePath}`, count + 1);
+  const newCount = count + 1;
+  await LocalStorage.setItem(`usage:${filePath}`, newCount);
+  if (cache) cache.set(filePath, newCount);
 }
 
 // Ermittle den robusten Pfad zur ripgrep-Binärdatei
@@ -206,13 +208,29 @@ export default function Command() {
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [searchText, setSearchText] = useState("");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const searchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const updateTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const resultsRef = useRef<SearchResult[]>([]);
+  const usageCacheRef = useRef<Map<string, number>>(new Map());
+  const userIsNavigatingRef = useRef(false);
 
   const preferences = getPreferenceValues<Preferences>();
   const searchDir = useMemo(() => preferences.searchPath || os.homedir(), [preferences.searchPath]);
+
+  // Usage-Counts einmalig beim Start laden
+  useEffect(() => {
+    LocalStorage.allItems().then((items) => {
+      const map = new Map<string, number>();
+      for (const [key, value] of Object.entries(items)) {
+        if (key.startsWith("usage:")) {
+          map.set(key.slice(6), Number(value) || 0);
+        }
+      }
+      usageCacheRef.current = map;
+    });
+  }, []);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -254,6 +272,7 @@ export default function Command() {
           "--no-messages",
           "--no-unicode",
           "--no-config",
+          "--no-binary",
           ...IGNORE_ARGS,
           text,
         ];
@@ -276,7 +295,7 @@ export default function Command() {
         });
 
         let isKilled = false;
-        rl.on("line", async (line) => {
+        rl.on("line", (line) => {
           if (isKilled || resultsRef.current.length >= MAX_RESULTS) {
             if (!isKilled) {
               isKilled = true;
@@ -292,33 +311,34 @@ export default function Command() {
               const data = parsed.data;
               const filePath = data.path.text;
               const fileName = path.basename(filePath);
-              
-              // Scoring-Logik (Case-Insensitive Whole Word Match)
+
+              // Scoring-Logik (synchron aus Cache)
               let score = 0;
-              // Dateiname Match (Nur ganze Wörter, Case-Insensitive)
               if (wordBoundaryRegex.test(fileName)) score += 100;
-              
-              // Usage-Score asynchron abrufen
-              const usageCount = await getUsageCount(filePath);
-              score += usageCount * 50;
+              score += (usageCacheRef.current.get(filePath) || 0) * 50;
+
+              const rawText: string = data.lines?.text ?? "";
+              // Null-Bytes und Steuerzeichen entfernen (z.B. aus Binärdateien)
+              const cleanText = rawText.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "").trim();
+              if (!cleanText) return; // Binärdatei-Treffer überspringen
 
               const newResult: SearchResult = {
                 file: filePath,
                 line: data.line_number.toString(),
-                text: data.lines.text.trim(),
+                text: cleanText,
                 score: score,
               };
-              
+
               resultsRef.current.push(newResult);
 
-              // Sortieren nach Score
-              resultsRef.current.sort((a, b) => (b.score || 0) - (a.score || 0));
-
-              // Batched UI updates
-              if (!updateTimeoutRef.current) {
+              // Batched UI updates (Sortieren nur einmal pro Batch)
+              // Kein Update wenn User gerade navigiert – würde Raycast crashen
+              if (!updateTimeoutRef.current && !userIsNavigatingRef.current) {
                 updateTimeoutRef.current = setTimeout(() => {
-                  setResults([...resultsRef.current]);
                   updateTimeoutRef.current = null;
+                  if (userIsNavigatingRef.current) return;
+                  resultsRef.current.sort((a, b) => (b.score || 0) - (a.score || 0));
+                  setResults([...resultsRef.current]);
                 }, 80);
               }
             }
@@ -367,17 +387,29 @@ export default function Command() {
             terminal: false,
           });
 
+          const MAX_CANDIDATES = 50;
+          const IGNORED_SET = new Set(IGNORED_DIRS);
           const candidatePaths: string[] = [];
+          let mdfindKilled = false;
+
           rlMdfind.on("line", (filePath) => {
-            // Ignoriere Verzeichnisse und ausgeschlossene Pfade
-            if (IGNORED_DIRS.some(dir => filePath.includes(`/${dir}/`))) return;
+            if (controller.signal.aborted || mdfindKilled) return;
+            // Schnelle Prüfung: Pfad-Segmente gegen Set testen
+            const parts = filePath.split("/");
+            if (parts.some((p) => IGNORED_SET.has(p))) return;
             candidatePaths.push(filePath);
+            // Frühzeitig abbrechen wenn genug Kandidaten gefunden
+            if (candidatePaths.length >= MAX_CANDIDATES) {
+              mdfindKilled = true;
+              mdfind.kill();
+              rlMdfind.close();
+            }
           });
 
           mdfind.on("close", (code) => {
             if (controller.signal.aborted) return;
-            
-            if (code === 0 && candidatePaths.length > 0) {
+
+            if (candidatePaths.length > 0) {
               runRipgrep(candidatePaths);
             } else {
               // Fallback auf Full Ripgrep Scan
@@ -408,6 +440,8 @@ export default function Command() {
     if (searchTimeoutRef.current) {
       clearTimeout(searchTimeoutRef.current);
     }
+
+    userIsNavigatingRef.current = false;
 
     if (!searchText || searchText.length < 2) {
       setResults([]);
@@ -447,6 +481,7 @@ export default function Command() {
     <List
       isLoading={isLoading}
       onSearchTextChange={setSearchText}
+      onSelectionChange={(id) => { userIsNavigatingRef.current = true; setSelectedId(id); }}
       searchBarPlaceholder="Suchen nach Text in Dateien..."
       filtering={false}
       isShowingDetail={true}
@@ -456,64 +491,59 @@ export default function Command() {
         description={results.length === 0 && !isLoading ? "Tippe mindestens 2 Zeichen ein, um die Suche zu starten." : undefined}
         icon={Icon.MagnifyingGlass} 
       />
-      {results.map((res, index) => (
+      {results.map((res) => {
+        const itemId = `${res.file}:${res.line}`;
+        const isSelected = selectedId === itemId;
+        return (
         <List.Item
-          key={`${res.file}-${res.line}-${index}`}
-          title={res.text}
+          key={itemId}
+          id={itemId}
+          title={res.text.slice(0, 100)}
           subtitle={path.basename(res.file)}
-          detail={
+          detail={isSelected ? (
             <List.Item.Detail
-              markdown={`
-### ${path.basename(res.file)}
-**Pfad:** \`${res.file.replace(os.homedir(), "~")}\`
-**Zeile:** ${res.line}
-
-\`\`\`
-${res.text}
-\`\`\`
-              `}
               metadata={
                 <List.Item.Detail.Metadata>
                   <List.Item.Detail.Metadata.Label title="Datei" text={path.basename(res.file)} />
                   <List.Item.Detail.Metadata.Label title="Pfad" text={res.file.replace(os.homedir(), "~")} />
                   <List.Item.Detail.Metadata.Label title="Zeile" text={res.line} />
                   <List.Item.Detail.Metadata.Separator />
-                  <List.Item.Detail.Metadata.Label title="Gefundener Text" text={res.text} />
+                  <List.Item.Detail.Metadata.Label title="Gefundener Text" text={res.text.slice(0, 300)} />
                 </List.Item.Detail.Metadata>
               }
             />
-          }
+          ) : undefined}
           actions={
             <ActionPanel>
-              <Action.Open title="In Editor öffnen" target={res.file} onOpen={() => incrementUsage(res.file)} />
-              <Action.OpenWith path={res.file} title="Öffnen mit..." onOpen={() => incrementUsage(res.file)} />
-              <Action.Open title="In Google Antigravity öffnen" target={res.file} application="Google Antigravity" icon={Icon.Code} onOpen={() => incrementUsage(res.file)} />
+              <Action.Open title="In Editor öffnen" target={res.file} onOpen={() => incrementUsage(res.file, usageCacheRef.current)} />
+              <Action.OpenWith path={res.file} title="Öffnen mit..." onOpen={() => incrementUsage(res.file, usageCacheRef.current)} />
+              <Action.Open title="In Google Antigravity öffnen" target={res.file} application="Google Antigravity" icon={Icon.Code} onOpen={() => incrementUsage(res.file, usageCacheRef.current)} />
               <ActionPanel.Submenu title="In JetBrains IDE öffnen" icon={Icon.Code}>
-                <Action.Open title="IntelliJ IDEA" target={res.file} application="IntelliJ IDEA" onOpen={() => incrementUsage(res.file)} />
-                <Action.Open title="WebStorm" target={res.file} application="WebStorm" onOpen={() => incrementUsage(res.file)} />
-                <Action.Open title="PyCharm" target={res.file} application="PyCharm" onOpen={() => incrementUsage(res.file)} />
-                <Action.Open title="PhpStorm" target={res.file} application="PhpStorm" onOpen={() => incrementUsage(res.file)} />
-                <Action.Open title="GoLand" target={res.file} application="GoLand" onOpen={() => incrementUsage(res.file)} />
-                <Action.Open title="CLion" target={res.file} application="CLion" onOpen={() => incrementUsage(res.file)} />
-                <Action.Open title="Rider" target={res.file} application="Rider" onOpen={() => incrementUsage(res.file)} />
+                <Action.Open title="IntelliJ IDEA" target={res.file} application="IntelliJ IDEA" onOpen={() => incrementUsage(res.file, usageCacheRef.current)} />
+                <Action.Open title="WebStorm" target={res.file} application="WebStorm" onOpen={() => incrementUsage(res.file, usageCacheRef.current)} />
+                <Action.Open title="PyCharm" target={res.file} application="PyCharm" onOpen={() => incrementUsage(res.file, usageCacheRef.current)} />
+                <Action.Open title="PhpStorm" target={res.file} application="PhpStorm" onOpen={() => incrementUsage(res.file, usageCacheRef.current)} />
+                <Action.Open title="GoLand" target={res.file} application="GoLand" onOpen={() => incrementUsage(res.file, usageCacheRef.current)} />
+                <Action.Open title="CLion" target={res.file} application="CLion" onOpen={() => incrementUsage(res.file, usageCacheRef.current)} />
+                <Action.Open title="Rider" target={res.file} application="Rider" onOpen={() => incrementUsage(res.file, usageCacheRef.current)} />
               </ActionPanel.Submenu>
-              <Action.ShowInFinder path={res.file} onOpen={() => incrementUsage(res.file)} />
+              <Action.ShowInFinder path={res.file} onOpen={() => incrementUsage(res.file, usageCacheRef.current)} />
               <Action.CopyToClipboard 
                 title="Pfad kopieren" 
                 content={res.file} 
                 shortcut={{ modifiers: ["cmd", "shift"], key: "c" }} 
-                onCopy={() => incrementUsage(res.file)}
+                onCopy={() => incrementUsage(res.file, usageCacheRef.current)}
               />
               <Action.CopyToClipboard 
                 title="Text kopieren" 
                 content={res.text} 
                 shortcut={{ modifiers: ["cmd"], key: "c" }} 
-                onCopy={() => incrementUsage(res.file)}
+                onCopy={() => incrementUsage(res.file, usageCacheRef.current)}
               />
             </ActionPanel>
           }
         />
-      ))}
+      )})}
     </List>
   );
 }
